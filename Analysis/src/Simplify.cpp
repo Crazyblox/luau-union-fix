@@ -24,7 +24,23 @@ LUAU_FASTFLAGVARIABLE(LuauRelateIndexersTypo)
 namespace Luau
 {
 
-using SimplifierSeenSet = DenseHashSet<std::pair<TypeId, TypeId>, TypePairHash>;
+// State for one top-level relate() query.
+//
+// inProgress is the cycle guard: a pair is inserted while its relation is
+// being computed, so it is only ever hit by a re-entrant query, i.e. a genuine
+// cycle in the type graph, for which we conservatively answer Coincident.
+//
+// completed caches finished results.  These used to be the same container,
+// which was unsound: a pair recorded under one argument order (relate()
+// canonicalizes via flip(relate(right, left))) was matched by a query issued in
+// the opposite order, and the "visited" hit answered Coincident for a pair
+// whose real relation had already been computed as something else.  Keeping
+// them as separate fields means "visited" can never be mistaken for "answered".
+struct SimplifierSeenSet
+{
+    DenseHashSet<std::pair<TypeId, TypeId>, TypePairHash> inProgress;
+    DenseHashMap<std::pair<TypeId, TypeId>, Relation, TypePairHash> completed;
+};
 
 struct TypeSimplifier
 {
@@ -173,7 +189,31 @@ static bool isTypeVariable(TypeId ty)
     return get<FreeType>(ty) || get<GenericType>(ty) || get<BlockedType>(ty) || get<PendingExpansionType>(ty);
 }
 
-Relation relate(TypeId left, TypeId right, SimplifierSeenSet& seen);
+Relation relateImpl(TypeId left, TypeId right, SimplifierSeenSet& seen);
+
+Relation relate(TypeId left, TypeId right, SimplifierSeenSet& seen)
+{
+    left = follow(left);
+    right = follow(right);
+
+    if (left == right)
+        return Relation::Coincident;
+
+    std::pair<TypeId, TypeId> typePair{left, right};
+
+    if (const Relation* done = seen.completed.find(typePair))
+        return *done;
+
+    // Cycle in progress: we are already computing this exact pair.
+    if (!seen.inProgress.try_insert(typePair))
+        return Relation::Coincident;
+
+    Relation result = relateImpl(left, right, seen);
+
+    seen.completed[typePair] = result;
+
+    return result;
+}
 
 Relation relateTableToExternType(const TableType* table, const ExternType* cls, SimplifierSeenSet& seen)
 {
@@ -559,23 +599,9 @@ Relation relateTables(const TableType* leftTable, const TableType* rightTable, S
 }
 
 // A cheap and approximate subtype test
-Relation relate(TypeId left, TypeId right, SimplifierSeenSet& seen)
+Relation relateImpl(TypeId left, TypeId right, SimplifierSeenSet& seen)
 {
     // TODO nice to have: Relate functions of equal argument and return arity
-
-    left = follow(left);
-    right = follow(right);
-
-    if (left == right)
-        return Relation::Coincident;
-
-    std::pair<TypeId, TypeId> typePair{left, right};
-    if (!seen.try_insert(typePair))
-    {
-        // TODO: is this right at all?
-        // The thinking here is that this is a cycle if we get here, and therefore its coincident.
-        return Relation::Coincident;
-    }
 
     if (get<UnknownType>(left))
     {
@@ -662,9 +688,48 @@ Relation relate(TypeId left, TypeId right, SimplifierSeenSet& seen)
     else if (get<IntersectionType>(right))
         return Relation::Intersects;
 
-    if (auto ut = get<UnionType>(left))
+    if (auto lt = get<UnionType>(left))
     {
-        for (TypeId part : ut)
+        if (auto rt = get<UnionType>(right))
+        {
+            // Union vs union: neither side is necessarily covered by a single
+            // part of the other, so test containment of each side against the
+            // other union as a whole and combine the two answers.  This is
+            // symmetric by construction, which keeps relate(a, b) ==
+            // flip(relate(b, a)) intact; the memo makes the repeated
+            // part-against-union queries cheap enough to afford it.
+            bool leftInRight = true;
+            for (TypeId part : lt)
+            {
+                Relation r = relate(part, right, seen);
+                if (r != Relation::Subset && r != Relation::Coincident)
+                {
+                    leftInRight = false;
+                    break;
+                }
+            }
+
+            bool rightInLeft = true;
+            for (TypeId part : rt)
+            {
+                Relation r = relate(part, left, seen);
+                if (r != Relation::Subset && r != Relation::Coincident)
+                {
+                    rightInLeft = false;
+                    break;
+                }
+            }
+
+            if (leftInRight && rightInLeft)
+                return Relation::Coincident;
+            if (leftInRight)
+                return Relation::Subset;
+            if (rightInLeft)
+                return Relation::Superset;
+            return Relation::Intersects;
+        }
+
+        for (TypeId part : lt)
         {
             Relation r = relate(part, right, seen);
             if (r == Relation::Superset || r == Relation::Coincident)
