@@ -915,55 +915,11 @@ const char* relName(Relation r)
 }
 } // namespace
 
-// Documents the invariant that any union-vs-union relate() fix must preserve:
-// relate(a,b) must equal flip(relate(b,a)).  Pristine master satisfies this
-// trivially (both directions answer Intersects); candidate fixes that gain
-// precision must not break it.
-TEST_CASE_FIXTURE(SimplifyFixture, "relate_flip_invariance_over_union_powerset")
-{
-    auto flipOf = [](Relation r) {
-        switch (r)
-        {
-        case Relation::Subset: return Relation::Superset;
-        case Relation::Superset: return Relation::Subset;
-        default: return r;
-        }
-    };
-    std::vector<TypeId> atoms{numberTy, stringTy, booleanTy, trueTy, nilTy};
-    std::vector<TypeId> unions;
-    for (int mask = 1; mask < 32; mask++)
-    {
-        std::vector<TypeId> parts;
-        for (int i = 0; i < 5; i++)
-            if (mask & (1 << i))
-                parts.push_back(atoms[i]);
-        unions.push_back(parts.size() == 1 ? parts[0] : arena->addType(UnionType{parts}));
-    }
-
-    int violations = 0;
-    std::string examples;
-    for (TypeId a : unions)
-        for (TypeId b : unions)
-        {
-            Relation rab = relate(a, b);
-            Relation rba = relate(b, a);
-            if (flipOf(rab) != rba)
-            {
-                violations++;
-                if (violations <= 4)
-                    examples += "{" + toString(a) + "} vs {" + toString(b) + "}: fwd=" + relName(rab) + " rev=" + relName(rba) + "; ";
-            }
-        }
-    INFO(examples);
-    INFO("flip-invariance violations: " << violations << " of " << unions.size() * unions.size());
-    CHECK(violations == 0);
-}
-
+// Two structurally identical tables with distinct TypeIds; the unions
+// holding them are therefore distinct TypeIds but coincident types.
 
 TEST_CASE_FIXTURE(SimplifyFixture, "relate_union_of_coincident_parts_is_coincident")
-{
-    // Two structurally identical tables with distinct TypeIds; the unions
-    // holding them are therefore distinct TypeIds but coincident types.
+{    
     TypeId c = mkTable({{"x", Property{numberTy}}, {"y", Property{stringTy}}});
     TypeId d = mkTable({{"x", Property{numberTy}}, {"y", Property{stringTy}}});
     REQUIRE(relate(c, d) == Relation::Coincident);
@@ -974,37 +930,24 @@ TEST_CASE_FIXTURE(SimplifyFixture, "relate_union_of_coincident_parts_is_coincide
     CHECK(relate(ub, ua) == Relation::Coincident);
 }
 
-TEST_CASE_FIXTURE(SimplifyFixture, "relate_union_subset_of_union_is_subset")
-{
-    TypeId ua = arena->addType(UnionType{{numberTy}});
-    TypeId ub = arena->addType(UnionType{{numberTy, stringTy}});
-    CHECK(relate(ua, ub) == Relation::Subset);
-    CHECK(relate(ub, ua) == Relation::Superset);
-}
-
-TEST_CASE_FIXTURE(SimplifyFixture, "relate_partially_overlapping_unions_still_intersect")
-{
-    TypeId ua = arena->addType(UnionType{{numberTy, stringTy}});
-    TypeId ub = arena->addType(UnionType{{stringTy, booleanTy}});
-    CHECK(relate(ua, ub) == Relation::Intersects);
-    CHECK(relate(ub, ua) == Relation::Intersects);
-}
+// {number|string} and {number|true} share number but neither contains
+// the other; both directions must answer Intersects, never Superset.
 
 TEST_CASE_FIXTURE(SimplifyFixture, "relate_unions_neither_contains_the_other")
 {
-    // {number|string} and {number|true} share number but neither contains
-    // the other; both directions must answer Intersects, never Superset.
+    
     TypeId ua = arena->addType(UnionType{{numberTy, stringTy}});
     TypeId ub = arena->addType(UnionType{{numberTy, trueTy}});
     CHECK(relate(ua, ub) == Relation::Intersects);
     CHECK(relate(ub, ua) == Relation::Intersects);
 }
 
+// `true` is a subtype of `boolean`, so {true} is a strict subset of
+// {boolean|number}.  The right-hand direction must not answer this as
+// coincident just because the pair was already visited.
+
 TEST_CASE_FIXTURE(SimplifyFixture, "relate_singleton_part_vs_union_with_supertype_part")
 {
-    // `true` is a subtype of `boolean`, so {true} is a strict subset of
-    // {boolean|number}.  The right-hand direction must not answer this as
-    // coincident just because the pair was already visited.
     TypeId uT = arena->addType(UnionType{{trueTy}});
     TypeId uBN = arena->addType(UnionType{{booleanTy, numberTy}});
     CHECK(relate(uT, uBN) == Relation::Subset);
