@@ -898,4 +898,43 @@ TEST_CASE_FIXTURE(ExactTableSimplifyFixture, "exact_and_inexact_disjoint_do_not_
     CHECK(neverTy == intersect(inexactY, exactX));
 }
 
+// Two structurally identical tables with distinct TypeIds; the unions
+// holding them are therefore distinct TypeIds but coincident types.
+
+TEST_CASE_FIXTURE(SimplifyFixture, "relate_union_of_coincident_parts_is_coincident")
+{    
+    TypeId c = mkTable({{"x", Property{numberTy}}, {"y", Property{stringTy}}});
+    TypeId d = mkTable({{"x", Property{numberTy}}, {"y", Property{stringTy}}});
+    REQUIRE(relate(c, d) == Relation::Coincident);
+
+    TypeId ua = arena->addType(UnionType{{numberTy, c}});
+    TypeId ub = arena->addType(UnionType{{numberTy, d}});
+    CHECK(relate(ua, ub) == Relation::Coincident);
+    CHECK(relate(ub, ua) == Relation::Coincident);
+}
+
+// {number|string} and {number|true} share number but neither contains
+// the other; both directions must answer Intersects, never Superset.
+
+TEST_CASE_FIXTURE(SimplifyFixture, "relate_unions_neither_contains_the_other")
+{
+    
+    TypeId ua = arena->addType(UnionType{{numberTy, stringTy}});
+    TypeId ub = arena->addType(UnionType{{numberTy, trueTy}});
+    CHECK(relate(ua, ub) == Relation::Intersects);
+    CHECK(relate(ub, ua) == Relation::Intersects);
+}
+
+// `true` is a subtype of `boolean`, so {true} is a strict subset of
+// {boolean|number}.  The right-hand direction must not answer this as
+// coincident just because the pair was already visited.
+
+TEST_CASE_FIXTURE(SimplifyFixture, "relate_singleton_part_vs_union_with_supertype_part")
+{
+    TypeId uT = arena->addType(UnionType{{trueTy}});
+    TypeId uBN = arena->addType(UnionType{{booleanTy, numberTy}});
+    CHECK(relate(uT, uBN) == Relation::Subset);
+    CHECK(relate(uBN, uT) == Relation::Superset);
+}
+
 TEST_SUITE_END();
